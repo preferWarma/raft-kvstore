@@ -1,0 +1,68 @@
+# tests/CMakeLists.txt
+
+# 日志管理器测试
+add_executable(test_log_manager test_log_manager.cpp)
+target_link_libraries(test_log_manager
+    raft_lib
+    proto_lib
+    GTest::GTest
+    GTest::Main
+    pthread
+)
+
+# RPC通信测试
+add_executable(test_rpc_communication test_rpc_communication.cpp)
+target_link_libraries(test_rpc_communication
+    rpc_lib
+    raft_lib
+    proto_lib
+    gRPC::grpc++
+    GTest::GTest
+    GTest::Main
+    pthread
+)
+
+# leaeder 选举测试
+add_executable(test_leader_election test_leader_election.cpp)
+target_link_libraries(test_leader_election
+    rpc_lib
+    raft_lib
+    proto_lib
+    gRPC::grpc++
+    GTest::GTest
+    GTest::Main
+    pthread
+)
+
+# 日志复制测试
+add_executable(test_log_replication test_log_replication.cpp)
+target_link_libraries(test_log_replication
+    rpc_lib
+    raft_lib
+    proto_lib
+    gRPC::grpc++
+    GTest::GTest
+    GTest::Main
+    pthread
+)
+
+# 存储层集成测试
+add_executable(test_kv_integration test_kv_integration.cpp)
+target_link_libraries(test_kv_integration
+    rpc_lib
+    raft_lib
+    proto_lib
+    storage_lib
+    GTest::GTest
+    GTest::Main
+)
+
+# 添加测试
+add_test(NAME LogManagerTest COMMAND test_log_manager)
+add_test(NAME RpcCommunicationTest COMMAND test_rpc_communication)
+add_test(NAME test_leader_election COMMAND test_leader_election)
+add_test(NAME test_log_replication COMMAND test_log_replication)
+add_test(NAME test_kv_integration COMMAND test_kv_integration)
+
+# 启用测试
+enable_testing()

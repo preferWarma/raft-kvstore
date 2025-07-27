@@ -1,0 +1,79 @@
+// src/proto/raft.proto
+syntax = "proto3";
+
+package raft;
+
+// Raft节点间通信服务
+service RaftService {
+  // 请求投票RPC
+  rpc RequestVote(RequestVoteRequest) returns (RequestVoteReply) {}
+
+  // 追加条目RPC（心跳和日志复制）
+  rpc AppendEntries(AppendEntriesRequest) returns (AppendEntriesReply) {}
+
+  // 安装快照RPC
+  rpc InstallSnapshot(InstallSnapshotRequest) returns (InstallSnapshotReply) {}
+}
+
+// 请求投票请求
+message RequestVoteRequest {
+  uint64 term = 1;           // 候选人的任期号
+  string candidate_id = 2;   // 请求投票的候选人ID
+  uint64 last_log_index = 3; // 候选人最后日志条目的索引
+  uint64 last_log_term = 4;  // 候选人最后日志条目的任期号
+}
+
+// 请求投票响应
+message RequestVoteReply {
+  uint64 term = 1;       // 当前任期号，用于候选人更新自己
+  bool vote_granted = 2; // 是否投票给候选人
+}
+
+// 日志条目
+message LogEntry {
+  uint64 index = 1;  // 日志索引
+  uint64 term = 2;   // 日志任期
+  bytes command = 3; // 命令内容（序列化的KV操作）
+  LogType type = 4;  // 日志类型
+
+  enum LogType {
+    NORMAL = 0;        // 普通日志
+    CONFIGURATION = 1; // 配置变更日志
+    NOOP = 2;          // 空操作（新leader使用）
+  }
+}
+
+// 追加条目请求
+message AppendEntriesRequest {
+  uint64 term = 1;               // leader的任期号
+  string leader_id = 2;          // leader的ID，follower可以重定向客户端
+  uint64 prev_log_index = 3;     // 新日志条目之前的日志索引
+  uint64 prev_log_term = 4;      // prev_log_index条目的任期号
+  repeated LogEntry entries = 5; // 要存储的日志条目（心跳时为空）
+  uint64 leader_commit = 6;      // leader的已提交索引
+}
+
+// 追加条目响应
+message AppendEntriesReply {
+  uint64 term = 1; // 当前任期号，用于leader更新自己
+  bool success =
+      2; // 如果follower包含匹配prev_log_index和prev_log_term的条目则为true
+  uint64 conflict_index = 3; // 冲突的日志索引（用于快速回退）
+  uint64 conflict_term = 4;  // 冲突索引处的任期号
+}
+
+// 安装快照请求
+message InstallSnapshotRequest {
+  uint64 term = 1;                // leader的任期号
+  string leader_id = 2;           // leader的ID
+  uint64 last_included_index = 3; // 快照中包含的最后日志条目的索引
+  uint64 last_included_term = 4;  // last_included_index的任期号
+  uint64 offset = 5;              // 快照分块的字节偏移量
+  bytes data = 6;                 // 快照分块的原始数据
+  bool done = 7;                  // 如果是最后一个分块则为true
+}
+
+// 安装快照响应
+message InstallSnapshotReply {
+  uint64 term = 1; // 当前任期号，用于leader更新自己
+}

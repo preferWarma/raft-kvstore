@@ -1,0 +1,9 @@
+build/
+*.pb.h
+*.pb.cc
+*.grpc.pb.h
+*.grpc.pb.cc
+*.swp
+*.swo
+*~
+.cache/

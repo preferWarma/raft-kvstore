@@ -1,0 +1,88 @@
+// src/proto/kvstore.proto
+syntax = "proto3";
+
+package kvstore;
+
+// 客户端KV操作服务
+service KVStoreService {
+  // 获取键值
+  rpc Get(GetRequest) returns (GetReply) {}
+
+  // 设置键值
+  rpc Put(PutRequest) returns (PutReply) {}
+
+  // 删除键值
+  rpc Delete(DeleteRequest) returns (DeleteReply) {}
+
+  // 批量操作
+  rpc BatchOp(BatchOpRequest) returns (BatchOpReply) {}
+}
+
+// Get请求
+message GetRequest {
+  string key = 1;
+  bool linearizable = 2; // 是否需要线性一致性读
+}
+
+// Get响应
+message GetReply {
+  bool success = 1;
+  string value = 2;
+  string error = 3;
+  string leader_hint = 4; // 如果不是leader，提示leader地址
+}
+
+// Put请求
+message PutRequest {
+  string key = 1;
+  string value = 2;
+}
+
+// Put响应
+message PutReply {
+  bool success = 1;
+  string error = 2;
+  string leader_hint = 3;
+}
+
+// Delete请求
+message DeleteRequest { string key = 1; }
+
+// Delete响应
+message DeleteReply {
+  bool success = 1;
+  string error = 2;
+  string leader_hint = 3;
+}
+
+// 批量操作请求
+message BatchOpRequest {
+  repeated Operation ops = 1;
+
+  message Operation {
+    oneof op {
+      PutRequest put = 1;
+      DeleteRequest delete = 2;
+    }
+  }
+}
+
+// 批量操作响应
+message BatchOpReply {
+  bool success = 1;
+  string error = 2;
+  string leader_hint = 3;
+}
+
+// KV命令（用于Raft日志）
+message KVCommand {
+  enum CommandType {
+    PUT = 0;
+    DELETE = 1;
+  }
+
+  CommandType type = 1;
+  string key = 2;
+  string value = 3;      // 仅用于PUT
+  string request_id = 4; // 用于幂等性
+}
