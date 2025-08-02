@@ -105,7 +105,7 @@ void RaftNode::Start() {
   heartbeat_thread_ = std::thread(&RaftNode::HeartbeatThread, this);
   apply_thread_ = std::thread(&RaftNode::ApplyThread, this);
 
-  LOG_INFO("Raft node[{}] started\n", node_id_);
+  LOG_INFO("Raft node[{}] started", node_id_);
 }
 
 void RaftNode::Stop() {
@@ -125,7 +125,7 @@ void RaftNode::Stop() {
   // 保存状态
   SaveState();
 
-  LOG_INFO("Raft node[{}] stopped\n", node_id_);
+  LOG_INFO("Raft node[{}] stopped", node_id_);
 }
 
 NodeState RaftNode::GetState() const {

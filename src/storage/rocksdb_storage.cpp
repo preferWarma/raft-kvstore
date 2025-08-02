@@ -28,18 +28,120 @@ RocksDBStorage::RocksDBStorage(const std::string &db_path) : db_path_(db_path) {
   read_options_.verify_checksums = true;
 }
 
-RocksDBStorage::~RocksDBStorage() { Close(); }
+RocksDBStorage::~RocksDBStorage() {
+  // 清理列族句柄
+  for (auto &[name, handle] : cf_handles_) {
+    if (handle) {
+      db_->DestroyColumnFamilyHandle(handle);
+    }
+  }
+  cf_handles_.clear();
+  Close();
+}
 
-bool RocksDBStorage::Open() {
-  rocksdb::Status status = rocksdb::DB::Open(options_, db_path_, &db_);
+bool RocksDBStorage::InitColumnFamilies() {
+  // 清理现有句柄
+  cf_handles_.clear();
+  if (db_) {
+    db_.reset();
+  }
+
+  // 列族描述符
+  std::vector<rocksdb::ColumnFamilyDescriptor> column_families;
+
+  // 始终包含默认列族
+  rocksdb::ColumnFamilyOptions default_options;
+  default_options.compression = rocksdb::kSnappyCompression;
+  column_families.emplace_back(rocksdb::kDefaultColumnFamilyName, default_options);
+
+  // KV列族配置
+  rocksdb::ColumnFamilyOptions kv_options;
+  kv_options.compression = rocksdb::kSnappyCompression;
+  kv_options.write_buffer_size = 64 << 20;
+  kv_options.max_write_buffer_number = 3;
+  column_families.emplace_back(KV_CF, kv_options);
+
+  // Raft日志列族配置
+  rocksdb::ColumnFamilyOptions log_options;
+  log_options.compression = rocksdb::kSnappyCompression;
+  log_options.write_buffer_size = 32 << 20;
+  log_options.max_write_buffer_number = 2;
+  column_families.emplace_back(RAFT_LOG_CF, log_options);
+
+  // Raft状态列族配置
+  rocksdb::ColumnFamilyOptions state_options;
+  state_options.compression = rocksdb::kSnappyCompression;
+  state_options.write_buffer_size = 8 << 20;
+  column_families.emplace_back(RAFT_STATE_CF, state_options);
+
+  // 快照列族配置
+  rocksdb::ColumnFamilyOptions snapshot_options;
+  snapshot_options.compression = rocksdb::kSnappyCompression;
+  snapshot_options.write_buffer_size = 64 << 20;
+  column_families.emplace_back(SNAPSHOT_CF, snapshot_options);
+
+  // 检查列族是否存在
+  std::vector<std::string> existing_cfs;
+  rocksdb::Status status = rocksdb::DB::ListColumnFamilies(
+      rocksdb::Options(), db_path_, &existing_cfs);
+
+  std::vector<rocksdb::ColumnFamilyHandle *> handles;
+
+  if (status.ok() && !existing_cfs.empty()) {
+    // 数据库已存在，打开现有列族
+    status =
+        rocksdb::DB::Open(options_, db_path_, column_families, &handles, &db_);
+  } else {
+    // 数据库不存在，创建新的列族
+    rocksdb::DB* db_ptr = nullptr;
+    status = rocksdb::DB::Open(options_, db_path_, &db_ptr);
+    if (!status.ok()) {
+      LOG_FATAL("Failed to open RocksDB: {}", status.ToString());
+      return false;
+    }
+    db_.reset(db_ptr);
+
+    // 创建列族（跳过默认列族）
+    for (size_t i = 1; i < column_families.size(); ++i) {
+      const auto &cf_desc = column_families[i];
+      rocksdb::ColumnFamilyHandle *handle;
+      status = db_->CreateColumnFamily(cf_desc.options, cf_desc.name, &handle);
+      if (!status.ok()) {
+        LOG_ERROR("Failed to create column family {}: {}", cf_desc.name,
+                  status.ToString());
+        return false;
+      }
+      cf_handles_[cf_desc.name] = handle;
+    }
+
+    // 重新打开数据库以使用所有列族
+    db_.reset();
+    handles.clear();
+    status =
+        rocksdb::DB::Open(options_, db_path_, column_families, &handles, &db_);
+  }
+
   if (!status.ok()) {
-    LOG_FATAL("Failed to open RocksDB: {}", status.ToString());
+    LOG_FATAL("Failed to open RocksDB with column families: {}",
+              status.ToString());
     return false;
   }
 
-  LOG_INFO("RocksDB opened at {}", db_path_);
+  // 映射列族句柄
+  for (size_t i = 0; i < column_families.size() && i < handles.size(); ++i) {
+    const std::string& cf_name = column_families[i].name;
+    if (cf_name == rocksdb::kDefaultColumnFamilyName) {
+      cf_handles_[DEFAULT_CF] = handles[i];
+    } else {
+      cf_handles_[cf_name] = handles[i];
+    }
+  }
+
+  LOG_INFO("RocksDB opened with column families at {}", db_path_);
   return true;
 }
+
+bool RocksDBStorage::Open() { return InitColumnFamilies(); }
 
 void RocksDBStorage::Close() {
   if (db_) {
@@ -50,31 +152,30 @@ void RocksDBStorage::Close() {
 
 // KV操作
 bool RocksDBStorage::Put(const std::string &key, const std::string &value) {
-  if (!db_)
+  if (!db_ || cf_handles_.find(KV_CF) == cf_handles_.end())
     return false;
 
-  std::string db_key = MakeKVKey(key);
-  rocksdb::Status status = db_->Put(write_options_, db_key, value);
+  rocksdb::Status status =
+      db_->Put(write_options_, cf_handles_[KV_CF], key, value);
   LOG_STATUS_IF_ONT_OK("Put", status);
   return status.ok();
 }
 
 bool RocksDBStorage::Get(const std::string &key, std::string *value) {
-  if (!db_ || !value)
+  if (!db_ || !value || cf_handles_.find(KV_CF) == cf_handles_.end())
     return false;
 
-  std::string db_key = MakeKVKey(key);
-  rocksdb::Status status = db_->Get(read_options_, db_key, value);
+  rocksdb::Status status =
+      db_->Get(read_options_, cf_handles_[KV_CF], key, value);
   LOG_STATUS_IF_ONT_OK("Get", status);
   return status.ok();
 }
 
 bool RocksDBStorage::Delete(const std::string &key) {
-  if (!db_)
+  if (!db_ || cf_handles_.find(KV_CF) == cf_handles_.end())
     return false;
 
-  std::string db_key = MakeKVKey(key);
-  rocksdb::Status status = db_->Delete(write_options_, db_key);
+  rocksdb::Status status = db_->Delete(write_options_, cf_handles_[KV_CF], key);
   LOG_STATUS_IF_ONT_OK("Delete", status);
   return status.ok();
 }
@@ -91,24 +192,27 @@ bool RocksDBStorage::WriteBatch(rocksdb::WriteBatch *batch) {
 // Raft状态持久化
 bool RocksDBStorage::SaveRaftState(uint64_t term,
                                    const std::string &voted_for) {
-  if (!db_)
+  if (!db_ || cf_handles_.find(RAFT_STATE_CF) == cf_handles_.end())
     return false;
 
   // 序列化Raft状态
   std::stringstream ss;
   ss << term << ":" << voted_for;
 
-  rocksdb::Status status = db_->Put(write_options_, RAFT_STATE_KEY, ss.str());
+  rocksdb::Status status =
+      db_->Put(write_options_, cf_handles_[RAFT_STATE_CF], "state", ss.str());
   LOG_STATUS_IF_ONT_OK("SaveRaftState", status);
   return status.ok();
 }
 
 bool RocksDBStorage::LoadRaftState(uint64_t *term, std::string *voted_for) {
-  if (!db_ || !term || !voted_for)
+  if (!db_ || !term || !voted_for ||
+      cf_handles_.find(RAFT_STATE_CF) == cf_handles_.end())
     return false;
 
   std::string value;
-  rocksdb::Status status = db_->Get(read_options_, RAFT_STATE_KEY, &value);
+  rocksdb::Status status =
+      db_->Get(read_options_, cf_handles_[RAFT_STATE_CF], "state", &value);
   if (!status.ok()) {
     if (status.IsNotFound()) {
       // 初始状态
@@ -135,8 +239,8 @@ bool RocksDBStorage::LoadRaftState(uint64_t *term, std::string *voted_for) {
 
 // 日志持久化
 bool RocksDBStorage::AppendLog(const raft::LogEntry &entry) {
-  if (!db_) {
-    LOG_ERROR("RocksDB not opened");
+  if (!db_ || cf_handles_.find(RAFT_LOG_CF) == cf_handles_.end()) {
+    LOG_ERROR("RocksDB not opened or raft log column family not found");
     return false;
   }
 
@@ -147,21 +251,24 @@ bool RocksDBStorage::AppendLog(const raft::LogEntry &entry) {
     return false;
   }
 
-  rocksdb::Status status = db_->Put(write_options_, key, value);
+  rocksdb::Status status =
+      db_->Put(write_options_, cf_handles_[RAFT_LOG_CF], key, value);
   LOG_STATUS_IF_ONT_OK("AppendLog", status);
   return status.ok();
 }
 
 bool RocksDBStorage::GetLog(uint64_t index, raft::LogEntry *entry) {
-  if (!db_ || !entry) {
-    LOG_ERROR("RocksDB not opened or entry is null");
+  if (!db_ || !entry || cf_handles_.find(RAFT_LOG_CF) == cf_handles_.end()) {
+    LOG_ERROR("RocksDB not opened or entry is null or raft log column family "
+              "not found");
     return false;
   }
 
   std::string key = MakeLogKey(index);
   std::string value;
 
-  rocksdb::Status status = db_->Get(read_options_, key, &value);
+  rocksdb::Status status =
+      db_->Get(read_options_, cf_handles_[RAFT_LOG_CF], key, &value);
   if (!status.ok()) {
     LOG_STATUS_IF_ONT_OK("GetLog", status);
     return false;
@@ -172,24 +279,22 @@ bool RocksDBStorage::GetLog(uint64_t index, raft::LogEntry *entry) {
 
 bool RocksDBStorage::GetLogs(uint64_t start_index, uint64_t end_index,
                              std::vector<raft::LogEntry> *entries) {
-  if (!db_ || !entries || start_index > end_index) {
-    LOG_ERROR("RocksDB not opened or entry is null or Invalid log index range");
+  if (!db_ || !entries || start_index > end_index ||
+      cf_handles_.find(RAFT_LOG_CF) == cf_handles_.end()) {
+    LOG_ERROR("RocksDB not opened or entry is null or Invalid log index range "
+              "or raft log column family not found");
     return false;
   }
 
   entries->clear();
 
   // 使用迭代器批量读取
-  std::unique_ptr<rocksdb::Iterator> iter(db_->NewIterator(read_options_));
+  rocksdb::ReadOptions read_opts = read_options_;
+  std::unique_ptr<rocksdb::Iterator> iter(
+      db_->NewIterator(read_opts, cf_handles_[RAFT_LOG_CF]));
 
   std::string start_key = MakeLogKey(start_index);
   for (iter->Seek(start_key); iter->Valid(); iter->Next()) {
-    // 检查是否是日志键
-    if (!iter->key().starts_with(RAFT_LOG_PREFIX)) {
-      break;
-    }
-
-    // 解析索引
     uint64_t index;
     if (!ParseLogKey(iter->key().ToString(), &index)) {
       continue;
@@ -210,21 +315,19 @@ bool RocksDBStorage::GetLogs(uint64_t start_index, uint64_t end_index,
 }
 
 bool RocksDBStorage::DeleteLogsAfter(uint64_t index) {
-  if (!db_) {
-    LOG_ERROR("RocksDB not opened");
+  if (!db_ || cf_handles_.find(RAFT_LOG_CF) == cf_handles_.end()) {
+    LOG_ERROR("RocksDB not opened or raft log column family not found");
     return false;
   }
 
   rocksdb::WriteBatch batch;
-  std::unique_ptr<rocksdb::Iterator> iter(db_->NewIterator(read_options_));
+  rocksdb::ReadOptions read_opts = read_options_;
+  std::unique_ptr<rocksdb::Iterator> iter(
+      db_->NewIterator(read_opts, cf_handles_[RAFT_LOG_CF]));
 
   std::string start_key = MakeLogKey(index + 1);
   for (iter->Seek(start_key); iter->Valid(); iter->Next()) {
-    if (!iter->key().starts_with(RAFT_LOG_PREFIX)) {
-      break;
-    }
-
-    batch.Delete(iter->key());
+    batch.Delete(cf_handles_[RAFT_LOG_CF], iter->key());
   }
 
   rocksdb::Status status = db_->Write(write_options_, &batch);
@@ -233,29 +336,29 @@ bool RocksDBStorage::DeleteLogsAfter(uint64_t index) {
 }
 
 bool RocksDBStorage::GetLastLogIndex(uint64_t *index) {
-  if (!db_ || !index) {
-    LOG_ERROR("RocksDB not opened or index is null");
+  if (!db_ || !index || cf_handles_.find(RAFT_LOG_CF) == cf_handles_.end()) {
+    LOG_ERROR("RocksDB not opened or index is null or raft log column family "
+              "not found");
     return false;
   }
 
   *index = 0;
 
   // 反向迭代找到最后一个日志条目
-  std::unique_ptr<rocksdb::Iterator> iter(db_->NewIterator(read_options_));
+  rocksdb::ReadOptions read_opts = read_options_;
+  std::unique_ptr<rocksdb::Iterator> iter(
+      db_->NewIterator(read_opts, cf_handles_[RAFT_LOG_CF]));
 
   // 从日志键的最大可能值开始反向查找
-  std::string max_log_key = RAFT_LOG_PREFIX;
-  max_log_key.append(20, '\xFF'); // 添加足够的0xFF使其成为最大键
+  std::string max_log_key = MakeLogKey(999999999999);
 
   iter->SeekForPrev(max_log_key);
 
   while (iter->Valid()) {
-    if (iter->key().starts_with(RAFT_LOG_PREFIX)) {
-      uint64_t log_index;
-      if (ParseLogKey(iter->key().ToString(), &log_index)) {
-        *index = log_index;
-        return true;
-      }
+    uint64_t log_index;
+    if (ParseLogKey(iter->key().ToString(), &log_index)) {
+      *index = log_index;
+      return true;
     }
     iter->Prev();
   }
@@ -266,8 +369,9 @@ bool RocksDBStorage::GetLastLogIndex(uint64_t *index) {
 // 快照相关
 bool RocksDBStorage::SaveSnapshot(uint64_t index, uint64_t term,
                                   const std::string &state_machine_data) {
-  if (!db_) {
-    LOG_ERROR("RocksDB not opened");
+  if (!db_ || cf_handles_.find(SNAPSHOT_CF) == cf_handles_.end() ||
+      cf_handles_.find(RAFT_LOG_CF) == cf_handles_.end()) {
+    LOG_ERROR("RocksDB not opened or required column families not found");
     return false;
   }
 
@@ -276,21 +380,19 @@ bool RocksDBStorage::SaveSnapshot(uint64_t index, uint64_t term,
   // 保存快照元数据
   std::stringstream meta;
   meta << index << ":" << term;
-  batch.Put(SNAPSHOT_META_KEY, meta.str());
+  batch.Put(cf_handles_[SNAPSHOT_CF], "meta", meta.str());
 
   // 保存状态机数据
-  batch.Put(SNAPSHOT_DATA_KEY, state_machine_data);
+  batch.Put(cf_handles_[SNAPSHOT_CF], "data", state_machine_data);
 
   // 删除快照之前的日志
-  std::unique_ptr<rocksdb::Iterator> iter(db_->NewIterator(read_options_));
-  for (iter->Seek(RAFT_LOG_PREFIX); iter->Valid(); iter->Next()) {
-    if (!iter->key().starts_with(RAFT_LOG_PREFIX)) {
-      break;
-    }
-
+  rocksdb::ReadOptions read_opts = read_options_;
+  std::unique_ptr<rocksdb::Iterator> iter(
+      db_->NewIterator(read_opts, cf_handles_[RAFT_LOG_CF]));
+  for (iter->SeekToFirst(); iter->Valid(); iter->Next()) {
     uint64_t log_index;
     if (ParseLogKey(iter->key().ToString(), &log_index) && log_index <= index) {
-      batch.Delete(iter->key());
+      batch.Delete(cf_handles_[RAFT_LOG_CF], iter->key());
     }
   }
 
@@ -301,15 +403,17 @@ bool RocksDBStorage::SaveSnapshot(uint64_t index, uint64_t term,
 
 bool RocksDBStorage::LoadSnapshot(uint64_t *index, uint64_t *term,
                                   std::string *state_machine_data) {
-  if (!db_ || !index || !term || !state_machine_data) {
-    LOG_ERROR(
-        "RocksDB not opened or index, term, or state_machine_data is null");
+  if (!db_ || !index || !term || !state_machine_data ||
+      cf_handles_.find(SNAPSHOT_CF) == cf_handles_.end()) {
+    LOG_ERROR("RocksDB not opened or index, term, or state_machine_data is "
+              "null or snapshot column family not found");
     return false;
   }
 
   // 加载快照元数据
   std::string meta;
-  rocksdb::Status status = db_->Get(read_options_, SNAPSHOT_META_KEY, &meta);
+  rocksdb::Status status =
+      db_->Get(read_options_, cf_handles_[SNAPSHOT_CF], "meta", &meta);
   if (!status.ok()) {
     return false;
   }
@@ -325,40 +429,39 @@ bool RocksDBStorage::LoadSnapshot(uint64_t *index, uint64_t *term,
   *term = std::stoull(meta.substr(pos + 1));
 
   // 加载状态机数据
-  status = db_->Get(read_options_, SNAPSHOT_DATA_KEY, state_machine_data);
+  status = db_->Get(read_options_, cf_handles_[SNAPSHOT_CF], "data",
+                    state_machine_data);
   LOG_STATUS_IF_ONT_OK("LoadSnapshot", status);
   return status.ok();
 }
 
 bool RocksDBStorage::HasSnapshot() {
-  if (!db_) {
-    LOG_ERROR("RocksDB not opened");
+  if (!db_ || cf_handles_.find(SNAPSHOT_CF) == cf_handles_.end()) {
+    LOG_ERROR("RocksDB not opened or snapshot column family not found");
     return false;
   }
 
   std::string value;
-  rocksdb::Status status = db_->Get(read_options_, SNAPSHOT_META_KEY, &value);
+  rocksdb::Status status =
+      db_->Get(read_options_, cf_handles_[SNAPSHOT_CF], "meta", &value);
   LOG_STATUS_IF_ONT_OK("HasSnapshot", status);
   return status.ok();
 }
 
 bool RocksDBStorage::GetAllKVPairs(std::map<std::string, std::string> *kvs) {
-  if (!db_ || !kvs) {
-    LOG_ERROR("RocksDB not opened or kvs is null");
+  if (!db_ || !kvs || cf_handles_.find(KV_CF) == cf_handles_.end()) {
+    LOG_ERROR(
+        "RocksDB not opened or kvs is null or kv column family not found");
     return false;
   }
 
   kvs->clear();
 
-  std::unique_ptr<rocksdb::Iterator> iter(db_->NewIterator(read_options_));
-  for (iter->Seek(KV_PREFIX); iter->Valid(); iter->Next()) {
-    if (!iter->key().starts_with(KV_PREFIX)) {
-      break;
-    }
-
-    // 去掉前缀得到实际的key
-    std::string key = iter->key().ToString().substr(strlen(KV_PREFIX));
-    kvs->emplace(key, iter->value().ToString());
+  rocksdb::ReadOptions read_opts = read_options_;
+  std::unique_ptr<rocksdb::Iterator> iter(
+      db_->NewIterator(read_opts, cf_handles_[KV_CF]));
+  for (iter->SeekToFirst(); iter->Valid(); iter->Next()) {
+    kvs->emplace(iter->key().ToString(), iter->value().ToString());
   }
 
   return true;
@@ -367,22 +470,18 @@ bool RocksDBStorage::GetAllKVPairs(std::map<std::string, std::string> *kvs) {
 // 辅助方法
 std::string RocksDBStorage::MakeLogKey(uint64_t index) const {
   std::stringstream ss;
-  ss << RAFT_LOG_PREFIX << std::setfill('0') << std::setw(20) << index;
+  ss << std::setfill('0') << std::setw(20) << index;
   return ss.str();
 }
 
 std::string RocksDBStorage::MakeKVKey(const std::string &key) const {
-  return std::string(KV_PREFIX) + key;
+  return key; // 直接使用原始key，不再需要前缀
 }
 
 bool RocksDBStorage::ParseLogKey(const std::string &key,
                                  uint64_t *index) const {
-  if (!rocksdb::Slice(key).starts_with(RAFT_LOG_PREFIX)) {
-    return false;
-  }
-
   try {
-    *index = std::stoull(key.substr(strlen(RAFT_LOG_PREFIX)));
+    *index = std::stoull(key);
     return true;
   } catch (...) {
     return false;

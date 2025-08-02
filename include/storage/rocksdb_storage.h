@@ -2,6 +2,7 @@
 #pragma once
 
 #include "raft.pb.h"
+#include <map>
 #include <memory>
 #include <rocksdb/db.h>
 #include <rocksdb/options.h>
@@ -10,7 +11,7 @@
 #include <vector>
 
 namespace storage {
-using std::string, std::vector;
+using std::string, std::vector, std::map;
 
 class RocksDBStorage {
 public:
@@ -55,12 +56,12 @@ public:
   string GetStats() const;
 
 private:
-  // 内部键的前缀
-  static constexpr const char *RAFT_STATE_KEY = "__raft:state__";
-  static constexpr const char *RAFT_LOG_PREFIX = "__raft:log:__";
-  static constexpr const char *SNAPSHOT_META_KEY = "__raft:snapshot:meta__";
-  static constexpr const char *SNAPSHOT_DATA_KEY = "__raft:snapshot:data__";
-  static constexpr const char *KV_PREFIX = "__kv:__";
+  // 列族名称
+  static constexpr const char *DEFAULT_CF = "default";
+  static constexpr const char *KV_CF = "kv";
+  static constexpr const char *RAFT_LOG_CF = "raft_log";
+  static constexpr const char *RAFT_STATE_CF = "raft_state";
+  static constexpr const char *SNAPSHOT_CF = "snapshot";
 
   // 辅助方法
 public:
@@ -73,6 +74,12 @@ public:
   rocksdb::Options options_;
   rocksdb::WriteOptions write_options_;
   rocksdb::ReadOptions read_options_;
+
+  // 列族句柄
+  map<string, rocksdb::ColumnFamilyHandle *> cf_handles_;
+
+  // 初始化列族
+  bool InitColumnFamilies();
 };
 
 } // namespace storage
