@@ -46,6 +46,14 @@ grpc::Status KVStoreServiceImpl::Get(grpc::ServerContext *context,
     }
   }
 
+  // 使用布隆过滤器检查键是否存在
+  if (!raft_node_->GetStateMachine()->MayExistInBloomFilter(request->key())) {
+    LOG_DEBUG("key: {} not found in bloom filter", request->key().c_str());
+    reply->set_success(false);
+    reply->set_error("Key not found");
+    return grpc::Status::OK;
+  }
+
   // 从状态机读取数据
   std::string value;
   if (raft_node_->GetStateMachine()->Get(request->key(), &value)) {

@@ -1,0 +1,59 @@
+graph TD
+    %% 查询流程
+    subgraph "查询流程"
+        A[客户端发起Get请求] --> B[RPC服务端接收请求]
+        B --> C{需要线性一致性?}
+        C -->|是| D{当前是领导者?}
+        C -->|否| E[布隆过滤器检查键是否存在]
+        D -->|否| F[返回错误并提示重定向]
+        D -->|是| E
+        E --> G{键可能存在?}
+        G -->|否| H[返回空结果给客户端]
+        G -->|是| I[状态机从RocksDB读取数据]
+        I --> J[返回结果给客户端]
+    end
+
+    %% 写入流程
+    subgraph "写入流程"
+        K[客户端发起Put/Delete请求] --> L[RPC服务端接收请求]
+        L --> M{当前是领导者?}
+        M -->|否| N[返回错误并提示重定向]
+        M -->|是| O[序列化命令并提交到Raft]
+        O --> P[Raft日志提交]
+        P --> Q[追加日志到日志管理器]
+        Q --> R[持久化日志到RocksDB]
+        R --> S[触发日志复制]
+        S --> T[向跟随者发送AppendEntries]
+        T --> U[跟随者处理日志条目]
+        U --> V[领导者推进提交索引]
+        V --> W[应用已提交日志到状态机]
+        W --> X[状态机执行命令]
+        X --> Y[更新RocksDB存储]
+        Y --> Z[更新布隆过滤器]
+        Z --> AA{满足快照条件?}
+        AA -->|是| AB[创建快照]
+        AA -->|否| AC[返回结果给客户端]
+        AB --> AD[序列化状态机数据]
+        AD --> AE[保存快照到RocksDB]
+        AE --> AF[更新日志管理器]
+        AF --> AC
+    end
+
+    %% 快照加载流程
+    subgraph "快照加载流程"
+        AG[节点启动] --> AH[加载持久化状态]
+        AH --> AI{存在快照?}
+        AI -->|是| AJ[加载快照数据]
+        AI -->|否| AK[加载日志条目]
+        AJ --> AL[恢复状态机]
+        AL --> AM[从RocksDB加载快照后日志]
+        AM --> AK
+        AK --> AN[完成节点初始化]
+    end
+
+    style A fill:#FFE4B5,stroke:#333
+    style K fill:#FFE4B5,stroke:#333
+    style AG fill:#FFE4B5,stroke:#333
+    style J fill:#98FB98,stroke:#333
+    style AC fill:#98FB98,stroke:#333
+    style AN fill:#98FB98,stroke:#333

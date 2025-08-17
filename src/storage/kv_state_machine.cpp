@@ -11,6 +11,9 @@ KVStateMachine::KVStateMachine(RocksDBStorage *storage) : storage_(storage) {
     LOG_FATAL("[KVStateMachine] Storage cannot be null");
     throw std::invalid_argument("Storage cannot be null");
   }
+  
+  // 初始化布隆过滤器
+  bloom_filter_ = std::make_unique<BloomFilter>(BLOOM_FILTER_SIZE, BLOOM_FILTER_HASH_COUNT);
 }
 
 ApplyResult KVStateMachine::Apply(const std::string &command_data) {
@@ -63,6 +66,16 @@ bool KVStateMachine::Get(const std::string &key, std::string *value) {
   return storage_->Get(key, value);
 }
 
+void KVStateMachine::AddToBloomFilter(const std::string& key) {
+  lock_guard<mutex> lock(mutex_);
+  bloom_filter_->Add(key);
+}
+
+bool KVStateMachine::MayExistInBloomFilter(const std::string& key) const {
+  lock_guard<mutex> lock(mutex_);
+  return bloom_filter_->MayExist(key);
+}
+
 ApplyResult KVStateMachine::ExecutePut(const kvstore::KVCommand &cmd) {
   if (cmd.key().empty()) {
     LOG_WARN("[KVStateMachine] Key cannot be empty");
@@ -73,6 +86,10 @@ ApplyResult KVStateMachine::ExecutePut(const kvstore::KVCommand &cmd) {
   if (success) {
     stats_.put_count++;
     LOG_INFO("[StateMachine] PUT: {} = {}", cmd.key(), cmd.value());
+    
+    // 添加到布隆过滤器
+    bloom_filter_->Add(cmd.key());
+    
     return {true, "", ""};
   } else {
     LOG_WARN("[StateMachine] PUT: {} failed", cmd.key());
@@ -170,6 +187,9 @@ bool KVStateMachine::RestoreSnapshot(const std::string &snapshot_data) {
     ss.ignore(); // 忽略换行符
 
     batch.Put(storage_->MakeKVKey(key), value);
+    
+    // 同时添加到布隆过滤器
+    bloom_filter_->Add(key);
   }
 
   bool success = storage_->WriteBatch(&batch);

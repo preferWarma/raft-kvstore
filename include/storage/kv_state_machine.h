@@ -3,6 +3,7 @@
 
 #include "kvstore.pb.h"
 #include "rocksdb_storage.h"
+#include "bloom_filter.h"
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -20,6 +21,10 @@ class KVStateMachine {
 public:
   explicit KVStateMachine(RocksDBStorage *storage);
   ~KVStateMachine() = default;
+
+  // 布隆过滤器操作
+  void AddToBloomFilter(const std::string& key);
+  bool MayExistInBloomFilter(const std::string& key) const;
 
   // 应用命令到状态机
   ApplyResult Apply(const std::string &command_data);
@@ -61,6 +66,11 @@ private:
   // 请求去重（防止重复执行）
   std::unordered_map<std::string, ApplyResult> request_cache_;
   static constexpr size_t MAX_CACHE_SIZE = 10000;
+
+  // 布隆过滤器
+  std::unique_ptr<BloomFilter> bloom_filter_;
+  static constexpr size_t BLOOM_FILTER_SIZE = 1000000; // 100万个位
+  static constexpr size_t BLOOM_FILTER_HASH_COUNT = 3;  // 3个哈希函数
 
   void CacheResult(const std::string &request_id, const ApplyResult &result);
   bool GetCachedResult(const std::string &request_id, ApplyResult *result);
