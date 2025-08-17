@@ -1,0 +1,39 @@
+{
+    "basic": {
+        "maxQueueSize": 81920,
+        "queueFullPolicy": "BLOCK",
+        "maxBlockTime_us": 16,
+        "maxDropCount": 40960,
+        "autoExpandMultiply": 4
+    },
+    "output": {
+        "logRootDir": "./logs",
+        "toFile": true,
+        "toConsole": true,
+        "minLogLevel": 0
+    },
+    "performance": {
+        "enableAsyncConsole": true,
+        "consoleFlushInterval_ms": 50,
+        "fileFlushInterval_ms": 100,
+        "consoleBatchSize": 512,
+        "fileBatchSize": 1024,
+        "consoleBufferSize_kb": 16,
+        "fileBufferSize_kb": 32
+    },
+    "rotation": {
+        "maxLogFileSize": 10485760,
+        "maxLogFileCount": 10
+    },
+    "cloud": {
+        "enable": true,
+        "serverUrl": "localhost:50000",
+        "uploadEndpoint": "/api/upload",
+        "uploadTimeout_s": 30,
+        "deleteAfterUpload": false,
+        "apiKey": "123456",
+        "maxRetries": 3,
+        "retryDelay_s": 5,
+        "maxQueueSize": 100
+    }
+}
